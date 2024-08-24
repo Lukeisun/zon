@@ -1,33 +1,23 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
 const std = @import("std");
+const net = std.net;
+const posix = std.posix;
+const print = std.debug.print;
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    // Try passing `--fuzz` to `zig build` and see if it manages to fail this test case!
-    const input_bytes = std.testing.fuzzInput(.{});
-    try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input_bytes));
+    const socket = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    const addr = net.Address{ .in = try net.Ip4Address.resolveIp("127.0.0.1", 8080) };
+    // ty stdlib
+    const opt_bytes = &std.mem.toBytes(@as(c_int, 1));
+    try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, opt_bytes);
+    posix.bind(socket, &addr.any, addr.getOsSockLen()) catch |err| {
+        std.log.err("{s}\n", .{@errorName(err)});
+        posix.close(socket);
+        std.process.exit(1);
+    };
+    try posix.listen(socket, 128);
+    const new_fd = try posix.accept(socket, null, null, 0);
+    var buf: [128]u8 = undefined;
+    const size = try posix.recv(new_fd, &buf, 128);
+    print("{s}\n", .{buf[0..size]});
+    posix.close(socket);
 }
