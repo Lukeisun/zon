@@ -5,6 +5,7 @@ const print = std.debug.print;
 const assert = std.debug.assert;
 const io_t = std.os.linux.IoUring;
 const UserData = std.os.linux.IORING_OP;
+const Allocator = std.mem.Allocator;
 pub fn fmt_data(op: UserData) u64 {
     const d: u8 = @intFromEnum(op);
     const ret: u64 = @as(u64, d) << 56;
@@ -14,6 +15,45 @@ pub fn get_op(data: u64) UserData {
     const op: u8 = @truncate(data >> 56);
     return @enumFromInt(op);
 }
+pub const Request = struct {
+    request_line: []const u8,
+    header_lines: [][]const u8,
+    body: [][]const u8,
+    allocator: Allocator,
+    pub fn parse(allocator: Allocator, request: []const u8) Request {
+        var s = std.mem.splitSequence(u8, request, "\r\n");
+        const request_line = s.next().?;
+        var header_lines = std.ArrayList([]const u8).init(allocator);
+        while (s.next()) |str| {
+            // break header
+            if (std.mem.eql(u8, str, "")) break;
+            header_lines.append(str) catch unreachable;
+        }
+        var body = std.ArrayList([]const u8).init(allocator);
+        while (s.next()) |str| {
+            if (std.mem.eql(u8, str, "")) break;
+            body.append(str) catch unreachable;
+        }
+        const header_slice = header_lines.toOwnedSlice() catch unreachable;
+        const body_slice = body.toOwnedSlice() catch unreachable;
+        return .{ .request_line = request_line, .header_lines = header_slice, .body = body_slice, .allocator = allocator };
+    }
+    pub fn destroy(self: *Request) void {
+        self.allocator.free(self.header_lines);
+        self.allocator.free(self.body);
+    }
+    pub fn show(self: Request) void {
+        print("Req Line: {s}\n", .{self.request_line});
+        print("Headers: \n", .{});
+        for (self.header_lines) |line| {
+            print("\t {s}\n", .{line});
+        }
+        print("Body: \n", .{});
+        for (self.body) |line| {
+            print("\t {s}\n", .{line});
+        }
+    }
+};
 pub const Server = struct {
     const buf_size = 128;
     const buf_count = 10;
@@ -24,12 +64,13 @@ pub const Server = struct {
         },
     };
     const socket_t = std.os.linux.socket_t;
+    allocator: Allocator,
     buffers: [buf_count][buf_size]u8 = undefined,
     socket: std.os.linux.socket_t,
     addr: net.Address,
     uring: io_t,
 
-    pub fn init(socket: socket_t, ip_str: []const u8, port: u16) !Server {
+    pub fn init(allocator: Allocator, socket: socket_t, ip_str: []const u8, port: u16) !Server {
         const addr = try net.Address.resolveIp(ip_str, port);
         const opt_bytes = &std.mem.toBytes(@as(c_int, 1));
         try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, opt_bytes);
@@ -40,7 +81,7 @@ pub const Server = struct {
             std.process.exit(1);
         };
         try posix.listen(socket, 128);
-        return .{ .addr = addr, .uring = uring, .socket = socket };
+        return .{ .addr = addr, .uring = uring, .socket = socket, .allocator = allocator };
     }
     pub fn start(self: *Server) !void {
         // dumy addr
@@ -83,9 +124,13 @@ pub const Server = struct {
                     .RECV => {
                         const buf_id = try cqe.buffer_id();
                         // process
+                        const request_raw = self.buffers[buf_id];
+                        var x = Request.parse(self.allocator, &request_raw);
+                        defer x.destroy();
+                        x.show();
                         const buf = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello";
                         //send back
-                        print("{s}\n", .{self.buffers[buf_id]});
+                        print("{s}\n", .{request_raw});
                         const fd: u16 = @truncate(cqe.user_data);
                         _ = try self.uring.send(fmt_data(UserData.SEND), fd, buf, 0);
                     },
@@ -100,11 +145,11 @@ pub const Server = struct {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
     const socket = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-    var server = try Server.init(socket, "127.0.0.1", 8080);
+    var server = try Server.init(allocator, socket, "127.0.0.1", 8080);
     server.start() catch unreachable;
-    // const addr = try net.Address.resolveIp("127.0.0.1", 8080);
-
     // user_data
     // ................................................................
     // ^^^^^^^^                                        ^^^^^^^^^^^^^^^^
